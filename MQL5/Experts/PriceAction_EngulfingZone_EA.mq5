@@ -174,8 +174,8 @@ void OnTick()
       return;
    
    //--- Check spread
-   double spread = SymbolInfoInteger(Symbol(), SYMBOL_SPREAD);
-   if(spread > InpMaxSpreadPoints)
+   long spread = SymbolInfoInteger(Symbol(), SYMBOL_SPREAD);
+   if(spread > (long)InpMaxSpreadPoints)
    {
       // Spread too wide — skip this bar but still manage zones
       ManageZones();
@@ -785,7 +785,7 @@ void OpenBuyTrade()
    //--- Execute
    string comment = "EZ_BUY_" + IntegerToString(InpMagicNumber);
    
-   if(g_trade.Buy(lot, Symbol(), ask, sl, tp, comment))
+   if(g_trade.Buy(lot, Symbol(), 0, sl, tp, comment))
    {
       Print("✅ BUY OPENED: Lot=", DoubleToString(lot, 2),
             " Entry=", DoubleToString(ask, digits),
@@ -840,7 +840,7 @@ void OpenSellTrade()
    //--- Execute
    string comment = "EZ_SELL_" + IntegerToString(InpMagicNumber);
    
-   if(g_trade.Sell(lot, Symbol(), bid, sl, tp, comment))
+   if(g_trade.Sell(lot, Symbol(), 0, sl, tp, comment))
    {
       Print("✅ SELL OPENED: Lot=", DoubleToString(lot, 2),
             " Entry=", DoubleToString(bid, digits),
