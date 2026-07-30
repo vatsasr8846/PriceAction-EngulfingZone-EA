@@ -1,0 +1,19 @@
+# Compiled MQL5 files
+*.ex5
+*.ex4
+
+# MetaEditor files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Backtest results
+*.htm
+*.html
+tester/
