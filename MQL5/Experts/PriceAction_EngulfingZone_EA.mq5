@@ -19,7 +19,6 @@
 #property version   "1.00"
 #property description "XAUUSD M5 — Engulfing Zone Retest Strategy"
 #property description "Pure price action. No indicators. No repainting."
-#property strict
 
 #include <Trade\Trade.mqh>
 
@@ -137,7 +136,15 @@ int OnInit()
    //--- Initialize trade object
    g_trade.SetExpertMagicNumber(InpMagicNumber);
    g_trade.SetDeviationInPoints(InpMaxSlippage);
-   g_trade.SetTypeFilling(ORDER_FILLING_IOC);
+   
+   //--- Auto-detect supported filling mode
+   long fillFlags = SymbolInfoInteger(Symbol(), SYMBOL_FILLING_MODE);
+   if((fillFlags & SYMBOL_FILLING_FOK) != 0)
+      g_trade.SetTypeFilling(ORDER_FILLING_FOK);
+   else if((fillFlags & SYMBOL_FILLING_IOC) != 0)
+      g_trade.SetTypeFilling(ORDER_FILLING_IOC);
+   else
+      g_trade.SetTypeFilling(ORDER_FILLING_RETURN);
    
    //--- Initialize zones as inactive
    ResetZone(g_bullZone, ZONE_BULLISH);
@@ -173,37 +180,32 @@ void OnTick()
    if(!IsNewCandle())
       return;
    
-   //--- Check spread
-   long spread = SymbolInfoInteger(Symbol(), SYMBOL_SPREAD);
-   if(spread > (long)InpMaxSpreadPoints)
-   {
-      // Spread too wide — skip this bar but still manage zones
-      ManageZones();
-      return;
-   }
-   
-   //--- Execute pending signals from the previous candle
-   //    (We open on the NEXT candle after signal, so check pending flags first)
+   //--- Execute pending signals from the previous candle FIRST
+   //    (Must happen before spread check — signal was validated on prior candle)
    if(!HasOpenPosition())
    {
       if(g_bullZone.SignalPending && g_bullZone.IsActive)
       {
-         OpenBuyTrade();
-         g_bullZone.SignalPending = false;
-         g_bullZone.TradeAlreadyTaken = true;
+         if(OpenBuyTrade())
+            g_bullZone.TradeAlreadyTaken = true;
       }
       else if(g_bearZone.SignalPending && g_bearZone.IsActive)
       {
-         OpenSellTrade();
-         g_bearZone.SignalPending = false;
-         g_bearZone.TradeAlreadyTaken = true;
+         if(OpenSellTrade())
+            g_bearZone.TradeAlreadyTaken = true;
       }
    }
-   else
+   //--- Always clear pending signals after processing (prevent stale signals)
+   g_bullZone.SignalPending = false;
+   g_bearZone.SignalPending = false;
+   
+   //--- Check spread — skip new signal detection if spread too wide
+   long spread = SymbolInfoInteger(Symbol(), SYMBOL_SPREAD);
+   if(spread > (long)InpMaxSpreadPoints)
    {
-      //--- If we had a pending signal but already have a position, clear it
-      g_bullZone.SignalPending = false;
-      g_bearZone.SignalPending = false;
+      // Spread too wide — skip new signal detection but still manage zones
+      ManageZones();
+      return;
    }
    
    //--- Update zone states (price left, retest, invalidation)
@@ -426,6 +428,11 @@ void InvalidateZone(EngulfingZone &zone)
 //+------------------------------------------------------------------+
 bool DetectSwingHigh(int shift)
 {
+   //--- Need at least InpSwingLookback bars on both sides
+   //    Right side must not go below shift 1 (no peeking at unclosed bar 0)
+   if(shift < InpSwingLookback + 1)
+      return false;
+   
    double high = iHigh(Symbol(), Period(), shift);
    
    //--- Check N candles on the left (older bars, higher index)
@@ -436,10 +443,11 @@ bool DetectSwingHigh(int shift)
    }
    
    //--- Check N candles on the right (newer bars, lower index)
+   //    Never go below shift 1 to avoid using unclosed bar 0
    for(int i = 1; i <= InpSwingLookback; i++)
    {
-      if(shift - i < 0)
-         return false;  // Not enough bars on the right
+      if(shift - i < 1)
+         return false;  // Would peek at unclosed bar — reject
       if(iHigh(Symbol(), Period(), shift - i) >= high)
          return false;
    }
@@ -452,6 +460,11 @@ bool DetectSwingHigh(int shift)
 //+------------------------------------------------------------------+
 bool DetectSwingLow(int shift)
 {
+   //--- Need at least InpSwingLookback bars on both sides
+   //    Right side must not go below shift 1 (no peeking at unclosed bar 0)
+   if(shift < InpSwingLookback + 1)
+      return false;
+   
    double low = iLow(Symbol(), Period(), shift);
    
    //--- Check N candles on the left (older bars, higher index)
@@ -462,10 +475,11 @@ bool DetectSwingLow(int shift)
    }
    
    //--- Check N candles on the right (newer bars, lower index)
+   //    Never go below shift 1 to avoid using unclosed bar 0
    for(int i = 1; i <= InpSwingLookback; i++)
    {
-      if(shift - i < 0)
-         return false;
+      if(shift - i < 1)
+         return false;  // Would peek at unclosed bar — reject
       if(iLow(Symbol(), Period(), shift - i) <= low)
          return false;
    }
@@ -480,11 +494,12 @@ bool DetectSwingLow(int shift)
 //+------------------------------------------------------------------+
 bool IsAtSwingLow(int shift)
 {
-   //--- Check if the engulfing candle or the candle before it is at a swing area
-   //    We look back a few candles to see if there's a swing low nearby
-   int lookRange = InpSwingLookback + 2;
+   //--- Minimum shift for valid swing detection is InpSwingLookback + 1
+   //    Search from there through a reasonable range around the engulfing candle
+   int minShift = InpSwingLookback + 1;
+   int maxShift = shift + InpSwingLookback + 2;
    
-   for(int i = shift; i <= shift + lookRange; i++)
+   for(int i = MathMax(shift, minShift); i <= maxShift; i++)
    {
       if(DetectSwingLow(i))
          return true;
@@ -498,9 +513,12 @@ bool IsAtSwingLow(int shift)
 //+------------------------------------------------------------------+
 bool IsAtSwingHigh(int shift)
 {
-   int lookRange = InpSwingLookback + 2;
+   //--- Minimum shift for valid swing detection is InpSwingLookback + 1
+   //    Search from there through a reasonable range around the engulfing candle
+   int minShift = InpSwingLookback + 1;
+   int maxShift = shift + InpSwingLookback + 2;
    
-   for(int i = shift; i <= shift + lookRange; i++)
+   for(int i = MathMax(shift, minShift); i <= maxShift; i++)
    {
       if(DetectSwingHigh(i))
          return true;
@@ -529,10 +547,15 @@ ENUM_TREND_DIR GetTrend()
    int requiredSwings = InpTrendSwingCount;
    int maxBarsToScan  = 200;  // Scan up to 200 bars back
    
+   //--- Check we have enough historical data
+   if(Bars(Symbol(), Period()) < maxBarsToScan + InpSwingLookback)
+      return TREND_NONE;
+   
    //--- We start from shift = InpSwingLookback + 1 to ensure we have
-   //    enough bars on both sides for swing detection
+   //    enough bars on both sides for swing detection (no bar 0 peeking)
    int startShift = InpSwingLookback + 1;
    
+   //--- Scan the full range to collect swing points over a consistent window
    for(int i = startShift; i < maxBarsToScan; i++)
    {
       //--- Collect swing highs
@@ -560,8 +583,8 @@ ENUM_TREND_DIR GetTrend()
          break;
    }
    
-   //--- Need at least 2 swing highs and 2 swing lows to determine trend
-   if(ArraySize(swingHighs) < 2 || ArraySize(swingLows) < 2)
+   //--- Need at least the requested swing count to determine trend reliably
+   if(ArraySize(swingHighs) < requiredSwings || ArraySize(swingLows) < requiredSwings)
       return TREND_NONE;
    
    //--- Check for Higher Highs (most recent swings are at index 0, oldest at end)
@@ -617,12 +640,12 @@ bool IsBullishEngulfing(int shift)
    double open2  = iOpen(Symbol(), Period(), shift + 1);
    double close2 = iClose(Symbol(), Period(), shift + 1);
    
-   //--- Current candle must be bullish
-   if(close1 <= open1)
+   //--- Current candle must be bullish (strict — reject doji)
+   if(close1 < open1 || close1 == open1)
       return false;
    
-   //--- Previous candle must be bearish
-   if(close2 >= open2)
+   //--- Previous candle must be bearish (strict — reject doji)
+   if(close2 > open2 || close2 == open2)
       return false;
    
    //--- Current body must engulf previous body
@@ -645,12 +668,12 @@ bool IsBearishEngulfing(int shift)
    double open2  = iOpen(Symbol(), Period(), shift + 1);
    double close2 = iClose(Symbol(), Period(), shift + 1);
    
-   //--- Current candle must be bearish
-   if(close1 >= open1)
+   //--- Current candle must be bearish (strict — reject doji)
+   if(close1 > open1 || close1 == open1)
       return false;
    
-   //--- Previous candle must be bullish
-   if(close2 <= open2)
+   //--- Previous candle must be bullish (strict — reject doji)
+   if(close2 < open2 || close2 == open2)
       return false;
    
    //--- Current body must engulf previous body
@@ -669,17 +692,20 @@ bool IsEngulfingInsideZone(int shift, const EngulfingZone &zone)
    double candleLow  = iLow(Symbol(), Period(), shift);
    double candleHigh = iHigh(Symbol(), Period(), shift);
    
-   //--- The engulfing candle should have significant overlap with the zone
-   //    At minimum, the candle's body or wicks must touch the zone
+   //--- The engulfing candle should be substantially inside the zone
+   //    Both the candle's low and high must be within zone boundaries
+   //    This ensures the candle is truly "inside" and not just touching
    if(zone.ZoneType == ZONE_BULLISH)
    {
-      //--- For bullish zone: candle low should be >= zone low and some part within zone
-      return (candleLow >= zone.ZoneLow && candleLow <= zone.ZoneHigh);
+      //--- For bullish zone: candle must be fully contained within zone
+      //    Low >= ZoneLow AND High <= ZoneHigh
+      return (candleLow >= zone.ZoneLow && candleHigh <= zone.ZoneHigh);
    }
    else
    {
-      //--- For bearish zone: candle high should be <= zone high and some part within zone
-      return (candleHigh <= zone.ZoneHigh && candleHigh >= zone.ZoneLow);
+      //--- For bearish zone: candle must be fully contained within zone
+      //    High <= ZoneHigh AND Low >= ZoneLow
+      return (candleHigh <= zone.ZoneHigh && candleLow >= zone.ZoneLow);
    }
 }
 
@@ -721,7 +747,14 @@ double CalculateLotSize()
    lot = MathMax(lot, brokerMin);
    lot = MathMin(lot, brokerMax);
    
-   return NormalizeDouble(lot, 2);
+   //--- Dynamic normalization based on step size
+   int lotDigits = 2;
+   if(stepSize > 0)
+   {
+      lotDigits = (int)MathMax(0, -MathLog10(stepSize));
+   }
+   
+   return NormalizeDouble(lot, lotDigits);
 }
 
 //================================================================
@@ -750,13 +783,22 @@ bool HasOpenPosition()
 
 //+------------------------------------------------------------------+
 //| Open a BUY trade with SL below bullish zone and 1:1 TP            |
+//| Returns true on successful execution, false otherwise              |
 //+------------------------------------------------------------------+
-void OpenBuyTrade()
+bool OpenBuyTrade()
 {
    if(!g_bullZone.IsActive)
    {
       Print("⚠️ Cannot open BUY: Bullish zone is not active");
-      return;
+      return false;
+   }
+   
+   //--- Re-check spread at actual trade time
+   long currentSpread = SymbolInfoInteger(Symbol(), SYMBOL_SPREAD);
+   if(currentSpread > (long)InpMaxSpreadPoints)
+   {
+      Print("⚠️ BUY aborted: Spread widened to ", currentSpread, " points");
+      return false;
    }
    
    double ask   = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
@@ -773,7 +815,17 @@ void OpenBuyTrade()
    {
       Print("⚠️ Cannot open BUY: Invalid risk distance. Ask=", DoubleToString(ask, digits),
             " SL=", DoubleToString(sl, digits));
-      return;
+      return false;
+   }
+   
+   //--- Check broker minimum stop level
+   long stopLevel = SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
+   double minStopDist = stopLevel * point;
+   if(riskDist < minStopDist)
+   {
+      Print("⚠️ Cannot open BUY: SL too close. Risk=", DoubleToString(riskDist, digits),
+            " MinRequired=", DoubleToString(minStopDist, digits));
+      return false;
    }
    
    //--- TP = Entry + risk distance (1:1 RR)
@@ -782,16 +834,17 @@ void OpenBuyTrade()
    //--- Lot size
    double lot = CalculateLotSize();
    
-   //--- Execute
+   //--- Execute (pass actual ask price so SL/TP match the entry)
    string comment = "EZ_BUY_" + IntegerToString(InpMagicNumber);
    
-   if(g_trade.Buy(lot, Symbol(), 0, sl, tp, comment))
+   if(g_trade.Buy(lot, Symbol(), ask, sl, tp, comment))
    {
       Print("✅ BUY OPENED: Lot=", DoubleToString(lot, 2),
             " Entry=", DoubleToString(ask, digits),
             " SL=", DoubleToString(sl, digits),
             " TP=", DoubleToString(tp, digits),
             " RR=1:1");
+      return true;
    }
    else
    {
@@ -800,18 +853,28 @@ void OpenBuyTrade()
             " Ask=", DoubleToString(ask, digits),
             " SL=", DoubleToString(sl, digits),
             " TP=", DoubleToString(tp, digits));
+      return false;
    }
 }
 
 //+------------------------------------------------------------------+
 //| Open a SELL trade with SL above bearish zone and 1:1 TP           |
+//| Returns true on successful execution, false otherwise              |
 //+------------------------------------------------------------------+
-void OpenSellTrade()
+bool OpenSellTrade()
 {
    if(!g_bearZone.IsActive)
    {
       Print("⚠️ Cannot open SELL: Bearish zone is not active");
-      return;
+      return false;
+   }
+   
+   //--- Re-check spread at actual trade time
+   long currentSpread = SymbolInfoInteger(Symbol(), SYMBOL_SPREAD);
+   if(currentSpread > (long)InpMaxSpreadPoints)
+   {
+      Print("⚠️ SELL aborted: Spread widened to ", currentSpread, " points");
+      return false;
    }
    
    double bid   = SymbolInfoDouble(Symbol(), SYMBOL_BID);
@@ -828,7 +891,17 @@ void OpenSellTrade()
    {
       Print("⚠️ Cannot open SELL: Invalid risk distance. Bid=", DoubleToString(bid, digits),
             " SL=", DoubleToString(sl, digits));
-      return;
+      return false;
+   }
+   
+   //--- Check broker minimum stop level
+   long stopLevel = SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
+   double minStopDist = stopLevel * point;
+   if(riskDist < minStopDist)
+   {
+      Print("⚠️ Cannot open SELL: SL too close. Risk=", DoubleToString(riskDist, digits),
+            " MinRequired=", DoubleToString(minStopDist, digits));
+      return false;
    }
    
    //--- TP = Entry - risk distance (1:1 RR)
@@ -837,16 +910,17 @@ void OpenSellTrade()
    //--- Lot size
    double lot = CalculateLotSize();
    
-   //--- Execute
+   //--- Execute (pass actual bid price so SL/TP match the entry)
    string comment = "EZ_SELL_" + IntegerToString(InpMagicNumber);
    
-   if(g_trade.Sell(lot, Symbol(), 0, sl, tp, comment))
+   if(g_trade.Sell(lot, Symbol(), bid, sl, tp, comment))
    {
       Print("✅ SELL OPENED: Lot=", DoubleToString(lot, 2),
             " Entry=", DoubleToString(bid, digits),
             " SL=", DoubleToString(sl, digits),
             " TP=", DoubleToString(tp, digits),
             " RR=1:1");
+      return true;
    }
    else
    {
@@ -855,6 +929,7 @@ void OpenSellTrade()
             " Bid=", DoubleToString(bid, digits),
             " SL=", DoubleToString(sl, digits),
             " TP=", DoubleToString(tp, digits));
+      return false;
    }
 }
 
